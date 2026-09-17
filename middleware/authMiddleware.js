@@ -1,25 +1,24 @@
 const jwt = require('jsonwebtoken');
-
-const verifyToken = (req, res, next) => {
-  const token = req.headers['authorization'];
-  if (!token) return res.status(403).json({ error: 'No token provided' });
-
-  jwt.verify(token.split(' ')[1], process.env.JWT_SECRET || 'secretkey', (err, decoded) => {
-    if (err) return res.status(401).json({ error: 'Unauthorized' });
-    req.userId = decoded.id;
-    req.userRole = decoded.role;
-    next();
-  });
-};
-
-const isAdmin = (req, res, next) => {
-  if (req.userRole !== 'admin') return res.status(403).json({ error: 'Require Admin Role' });
-  next();
-};
-
-const isDriver = (req, res, next) => {
-  if (req.userRole !== 'driver') return res.status(403).json({ error: 'Require Driver Role' });
-  next();
-};
-
-module.exports = { verifyToken, isAdmin, isDriver };
+const { getDB, getJWTSecret } = require('../config/db');
+const { accessMessage, fail } = require('../lib/access');
+async function authenticate(token) {
+  let decoded;
+  try { decoded = jwt.verify(token, getJWTSecret()); } catch { fail(401,'Please sign in again.'); }
+  const user = await getDB().get('SELECT u.*, i.name AS institute_name FROM users u LEFT JOIN institutes i ON i.id=u.institute_id WHERE u.id=?', decoded.id);
+  if (!user) fail(401,'Account no longer exists.');
+  const message = accessMessage(user);
+  if (message) fail(403,message,'ACCOUNT_SUSPENDED');
+  return user;
+}
+async function verifyToken(req,res,next) {
+  try {
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Bearer ')) fail(401,'Please sign in.');
+    req.user = await authenticate(header.slice(7));
+    req.userId = req.user.id; req.userRole = req.user.role; next();
+  } catch(err) { next(err); }
+}
+const isAdmin = (req,res,next) => ['admin','superadmin'].includes(req.userRole) ? next() : res.status(403).json({error:'Administrator access required.'});
+const isSuperAdmin = (req,res,next) => req.userRole === 'superadmin' ? next() : res.status(403).json({error:'Super admin access required.'});
+const isDriver = (req,res,next) => req.userRole === 'driver' ? next() : res.status(403).json({error:'Driver access required.'});
+module.exports={authenticate,verifyToken,isAdmin,isSuperAdmin,isDriver};
