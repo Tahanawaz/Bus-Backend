@@ -39,7 +39,7 @@ async function createServer(options={}) {
    await expireStudents();
    for(const socket of io.sockets.sockets.values()){
     const u=await getDB().get('SELECT * FROM users WHERE id=?',socket.data.user.id);
-    if(!u||accessMessage(u))socket.disconnect(true);
+    if(!u||u.must_change_password||u.token_version!==socket.data.user.token_version||accessMessage(u))socket.disconnect(true);
    }
   }catch(err){console.error('Access maintenance failed:',err.message);}
  },30000);timer.unref();

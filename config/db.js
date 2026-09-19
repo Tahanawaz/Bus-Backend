@@ -25,7 +25,7 @@ async function initDB(filename = process.env.DB_PATH || path.resolve(__dirname, 
     CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   const additions = {
-    users: { phone: 'TEXT', institute_id: 'INTEGER REFERENCES institutes(id)', status: "TEXT NOT NULL DEFAULT 'active'", suspension_reason: 'TEXT', access_start: 'TEXT', access_end: 'TEXT' },
+    users: { must_change_password: 'INTEGER NOT NULL DEFAULT 1', token_version: 'INTEGER NOT NULL DEFAULT 0', phone: 'TEXT', institute_id: 'INTEGER REFERENCES institutes(id)', status: "TEXT NOT NULL DEFAULT 'active'", suspension_reason: 'TEXT', access_start: 'TEXT', access_end: 'TEXT' },
     buses: { institute_id: 'INTEGER REFERENCES institutes(id)', route_id: 'INTEGER REFERENCES routes(id)', current_stop: 'TEXT', departure_time: 'TEXT' },
     routes: { institute_id: 'INTEGER REFERENCES institutes(id)' }
   };
@@ -53,6 +53,7 @@ async function initDB(filename = process.env.DB_PATH || path.resolve(__dirname, 
         access_start TEXT NOT NULL, access_end TEXT NOT NULL, reference TEXT NOT NULL DEFAULT '',
         recorded_by INTEGER REFERENCES users(id), recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE UNIQUE INDEX IF NOT EXISTS one_admin_per_institute ON users(institute_id) WHERE role='admin';
       CREATE INDEX IF NOT EXISTS users_institute_role ON users(institute_id, role);
       CREATE INDEX IF NOT EXISTS buses_institute ON buses(institute_id);
       CREATE INDEX IF NOT EXISTS routes_institute ON routes(institute_id);

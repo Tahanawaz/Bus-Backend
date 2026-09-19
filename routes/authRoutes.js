@@ -2,6 +2,7 @@ const express=require('express');
 const c=require('../controllers/authController');
 const {verifyToken,isAdmin,isSuperAdmin}=require('../middleware/authMiddleware');
 const router=express.Router();
+router.post('/change-initial-password',c.changeInitialPassword);
 router.post('/signup',c.signup); router.post('/login',c.login);
 router.get('/me',verifyToken,c.me);
 router.post('/register-driver',verifyToken,isAdmin,c.registerDriver);

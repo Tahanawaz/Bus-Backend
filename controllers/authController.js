@@ -10,16 +10,19 @@ function identity(body, creating) {
   return {name,email};
 }
 async function create(req,res,role,publicSignup=false) {
-  const {name,email}=identity(req.body,true);
+  const {name,email}=identity({...req.body,password:undefined},false);
   let institute;
   if(publicSignup) {
     institute=Number(req.body.institute_id);
     if(!await getDB().get('SELECT id FROM institutes WHERE id=?',institute)) fail(400,'Select an institute.');
   } else institute=await scope(req,true);
-  const password=await bcrypt.hash(req.body.password,10);
+  const password=await bcrypt.hash('password123',10);
   const student=role==='student';
-  const result=await withWrite(tx=>tx.run('INSERT INTO users(name,email,password,role,phone,institute_id,status,suspension_reason) VALUES (?,?,?,?,?,?,?,?)',
-    name,email,password,role,req.body.phone || null,institute,student?'suspended':'active',student?'pending':null));
+  const result=await withWrite(async tx=>{
+    if(role==='admin' && await tx.get("SELECT id FROM users WHERE role='admin' AND institute_id=?",institute)) fail(409,'This institute already has an admin. Use Change admin instead.');
+    return tx.run('INSERT INTO users(name,email,password,role,phone,institute_id,status,suspension_reason) VALUES (?,?,?,?,?,?,?,?)',
+    name,email,password,role,req.body.phone || null,institute,student?'suspended':'active',student?'pending':null);
+  });
   res.status(201).json({message:student?'Student created. Record payment and access dates to activate.':'Account created.',userId:result.lastID,driverId:result.lastID});
 }
 exports.signup=(req,res)=>create(req,res,'student',true);
@@ -32,7 +35,11 @@ exports.login=async(req,res)=>{
   if(!user || typeof req.body.password!=='string' || !await bcrypt.compare(req.body.password,user.password)) fail(401,'Invalid email or password.');
   const message=accessMessage(user);
   if(message) fail(403,message,'ACCOUNT_SUSPENDED');
-  const token=jwt.sign({id:user.id},getJWTSecret(),{expiresIn:'24h'});
+  if(user.must_change_password) {
+    const changeToken=jwt.sign({id:user.id,version:user.token_version,purpose:'password-change'},getJWTSecret(),{expiresIn:'10m'});
+    return res.json({requiresPasswordChange:true,changeToken});
+  }
+  const token=jwt.sign({id:user.id,version:user.token_version,purpose:'session'},getJWTSecret(),{expiresIn:'24h'});
   res.json({token,user:publicUser(user)});
 };
 exports.me=(req,res)=>res.json(publicUser(req.user));
@@ -47,8 +54,10 @@ exports.getAllAdmins=(req,res)=>list(req,res,'admin');
 async function update(req,res,role) {
   const user=await record(req,'users',role);
   const {name,email}=identity(req.body,false);
-  const password=req.body.password?await bcrypt.hash(req.body.password,10):user.password;
-  await withWrite(tx=>tx.run('UPDATE users SET name=?,email=?,password=?,phone=? WHERE id=?',name,email,password,req.body.phone ?? user.phone,user.id));
+  const reset=Boolean(req.body.password)||(role==='admin'&&req.body.replace_admin===true);
+  const password=reset?await bcrypt.hash(role==='admin'&&req.body.replace_admin===true?'password123':req.body.password,10):user.password;
+  await withWrite(tx=>tx.run('UPDATE users SET name=?,email=?,password=?,phone=?,must_change_password=?,token_version=token_version+? WHERE id=?',name,email,password,req.body.phone ?? user.phone,reset?1:user.must_change_password,reset?1:0,user.id));
+  if(reset)req.io?.in('user:'+user.id).disconnectSockets(true);
   res.json({message:'Account updated.'});
 }
 exports.updateStudent=(req,res)=>update(req,res,'student');
@@ -100,4 +109,24 @@ exports.recordPayment=async(req,res)=>{
 exports.paymentHistory=async(req,res)=>{
   const user=await record(req,'users','student');
   res.json(await getDB().all('SELECT p.*,u.name AS recorded_by_name FROM payments p LEFT JOIN users u ON u.id=p.recorded_by WHERE student_id=? ORDER BY p.id DESC',user.id));
+};
+
+exports.changeInitialPassword=async(req,res)=>{
+  let claims;
+  try { claims=jwt.verify(req.body.changeToken,getJWTSecret()); } catch { fail(401,'Password change session expired. Sign in again.'); }
+  if(claims.purpose!=='password-change')fail(401,'Sign in to change your initial password.');
+  const user=await getDB().get('SELECT * FROM users WHERE id=?',claims.id);
+  if(!user||!user.must_change_password||claims.version!==user.token_version)fail(401,'Password change session is no longer valid. Sign in again.');
+  const message=accessMessage(user);if(message)fail(403,message,'ACCOUNT_SUSPENDED');
+  const password=req.body.password;
+  if(typeof password!=='string'||password.length<8||Buffer.byteLength(password)>72)fail(400,'Use at least 8 characters and at most 72 bytes.');
+  if(password==='password123'||await bcrypt.compare(password,user.password))fail(400,'Choose a different password from your temporary or current password.');
+  if(password!==req.body.confirmPassword)fail(400,'Passwords do not match.');
+  const hash=await bcrypt.hash(password,10);
+  await withWrite(async tx=>{
+    const result=await tx.run('UPDATE users SET password=?,must_change_password=0,token_version=token_version+1 WHERE id=? AND token_version=? AND must_change_password=1',hash,user.id,claims.version);
+    if(!result.changes)fail(401,'This password change session has already been used. Sign in again.');
+  });
+  req.io?.in('user:'+user.id).disconnectSockets(true);
+  res.json({message:'Password changed. Sign in with your new password.'});
 };

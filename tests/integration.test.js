@@ -16,13 +16,23 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
  const sockets=[];
  t.after(async()=>{sockets.forEach(s=>s.disconnect());await service.close();});
  const hash=await bcrypt.hash('test-password',4);
- await withWrite(db=>db.run("INSERT INTO users(name,email,password,role,status) VALUES ('Super','super@test.example',?,'superadmin','active')",hash));
+ await withWrite(db=>db.run("INSERT INTO users(name,email,password,role,status,must_change_password) VALUES ('Super','super@test.example',?,'superadmin','active',0)",hash));
  const request=async(method,url,token,body,expected=200)=>{
   const res=await fetch(base+'/api'+url,{method,headers:{...(token?{Authorization:'Bearer '+token}:{}),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
-  const data=res.headers.get('content-type')?.includes('application/pdf')?Buffer.from(await res.arrayBuffer()):await res.json();
+  const data=res.headers.get('content-type')?.includes('application/pdf')?Buffer.from(await res.arrayBuffer()):await (async()=>{const text=await res.text();try{return JSON.parse(text);}catch{throw Error(method+' '+url+' '+res.status+' '+text.slice(0,400));}})();
   assert.equal(res.status,expected,method+' '+url+' '+(Buffer.isBuffer(data)?'PDF':JSON.stringify(data)));return data;
  };
- const login=(email,expected=200)=>request('POST','/auth/login',null,{email,password:'test-password'},expected);
+ const login=async(email,expected=200)=>{
+  const row=await getDB().get('SELECT password FROM users WHERE email=?',email);
+  const password=await bcrypt.compare('test-password',row.password)?'test-password':'password123';
+  const response=await request('POST','/auth/login',null,{email,password},expected);
+  if(response.requiresPasswordChange){
+   assert.ok(!response.token);await request('GET','/buses',response.changeToken,null,401);
+   await request('POST','/auth/change-initial-password',null,{changeToken:response.changeToken,password:'test-password',confirmPassword:'test-password'});
+   return request('POST','/auth/login',null,{email,password:'test-password'},expected);
+  }
+  return response;
+ };
  const root=(await login('super@test.example')).token;
  let a,b,adminA,adminB,studentA,studentB,driverA,driverB,studentToken,driverToken,busA,busB;
  await t.test('only superadmin creates institutes and scoped administrators',async()=>{
@@ -34,6 +44,40 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   await request('POST','/auth/admins',adminA,{name:'Forbidden'},403);
   assert.equal((await request('GET','/institutes',adminA)).length,1);
   await request('GET','/auth/students?institute_id='+b,adminA,null,403);
+ });
+ await t.test('one admin per institute and mandatory password change cannot be bypassed',async()=>{
+  await request('POST','/auth/admins',root,{name:'Duplicate',email:'duplicate@test.example',institute_id:a},409);
+  const created=await request('POST','/auth/register-driver',adminA,{name:'First Login',email:'first@test.example',password:'ignored-custom-password'},201);
+  await request('POST','/auth/login',null,{email:'first@test.example',password:'ignored-custom-password'},401);
+  const first=await request('POST','/auth/login',null,{email:'first@test.example',password:'password123'});
+  assert.equal(first.requiresPasswordChange,true);assert.ok(!first.token);
+  await request('GET','/auth/me',first.changeToken,null,401);
+  await request('POST','/auth/change-initial-password',null,{changeToken:first.changeToken,password:'password123',confirmPassword:'password123'},400);
+  await request('POST','/auth/change-initial-password',null,{changeToken:first.changeToken,password:'new-secret-123',confirmPassword:'mismatch'},400);
+  await request('POST','/auth/change-initial-password',null,{changeToken:first.changeToken,password:'new-secret-123',confirmPassword:'new-secret-123'});
+  await request('POST','/auth/change-initial-password',null,{changeToken:first.changeToken,password:'other-secret-123',confirmPassword:'other-secret-123'},401);
+  const signed=await request('POST','/auth/login',null,{email:'first@test.example',password:'new-secret-123'});
+  await request('POST','/auth/change-initial-password',null,{changeToken:signed.token,password:'other-secret-123',confirmPassword:'other-secret-123'},401);
+  await request('PUT','/auth/drivers/'+created.driverId,adminA,{name:'First Login',email:'first@test.example',password:'reset-password'});
+  await request('GET','/auth/me',signed.token,null,401);
+  await request('DELETE','/auth/drivers/'+created.driverId,adminA);
+  const c=(await request('POST','/institutes',root,{name:'Replacement Institute'},201)).id;
+  const old=(await request('POST','/auth/admins',root,{name:'Old Admin',email:'old-admin@test.example',institute_id:c},201)).userId;
+  const oldToken=(await login('old-admin@test.example')).token;
+  await request('PUT','/auth/admins/'+old,root,{name:'New Admin',email:'new-admin@test.example',replace_admin:true});
+  await request('GET','/auth/me',oldToken,null,401);
+  await request('POST','/auth/login',null,{email:'old-admin@test.example',password:'test-password'},401);
+  const replacement=await request('POST','/auth/login',null,{email:'new-admin@test.example',password:'password123'});
+  assert.equal(replacement.requiresPasswordChange,true);
+  assert.equal((await getDB().get("SELECT count(*) n FROM users WHERE role='admin' AND institute_id=?",c)).n,1);
+ });
+ await t.test('institute deletion is superadmin-only and protects linked data; creation requires institute',async()=>{
+  const empty=(await request('POST','/institutes',root,{name:'Empty Delete Campus'},201)).id;
+  await request('DELETE','/institutes/'+empty,adminA,null,403);
+  await request('DELETE','/institutes/'+a,root,null,409);
+  await request('DELETE','/institutes/'+empty,root);
+  await request('DELETE','/institutes/'+empty,root,null,404);
+  for(const [url,body] of [['/auth/students',{name:'Test',email:'test-s@test.example'}],['/auth/register-driver',{name:'Test',email:'test-d@test.example'}],['/routes',{name:'Route',stops:['Gate'],etas:['08:00']}],['/buses',{name:'Bus',number_plate:'TEST-9',route:'Route'}]])await request('POST',url,root,body,400);
  });
  await t.test('signup cannot choose privileged roles; new students require activation',async()=>{
   studentA=(await request('POST','/auth/signup',null,{name:'Alpha Student',email:'student-a@test.example',password:'test-password',institute_id:a,role:'superadmin',status:'active'},201)).userId;
