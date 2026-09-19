@@ -43,6 +43,52 @@ exports.login=async(req,res)=>{
   res.json({token,user:publicUser(user)});
 };
 exports.me=(req,res)=>res.json(publicUser(req.user));
+exports.updateProfile=async(req,res)=>{
+  const {name,email}=identity(req.body,false);
+  const phone=String(req.body.phone||'').trim();
+  if(phone.length>30)fail(400,'Phone number must be at most 30 characters.');
+  await withWrite(tx=>tx.run('UPDATE users SET name=?,email=?,phone=? WHERE id=?',name,email,phone||null,req.userId));
+  const user=await getDB().get('SELECT u.*,i.name AS institute_name FROM users u LEFT JOIN institutes i ON i.id=u.institute_id WHERE u.id=?',req.userId);
+  res.json({message:'Profile updated.',user:publicUser(user)});
+};
+exports.changePassword=async(req,res)=>{
+  const current=req.body.currentPassword;
+  const password=req.body.password;
+  if(typeof current!=='string'||!await bcrypt.compare(current,req.user.password))fail(400,'Current password is incorrect.');
+  if(typeof password!=='string'||password.length<8||Buffer.byteLength(password)>72)fail(400,'Use at least 8 characters and at most 72 bytes.');
+  if(password!==req.body.confirmPassword)fail(400,'Passwords do not match.');
+  if(await bcrypt.compare(password,req.user.password))fail(400,'Choose a password different from your current password.');
+  const hash=await bcrypt.hash(password,10);
+  await withWrite(tx=>tx.run('UPDATE users SET password=?,token_version=token_version+1 WHERE id=?',hash,req.userId));
+  const user=await getDB().get('SELECT u.*,i.name AS institute_name FROM users u LEFT JOIN institutes i ON i.id=u.institute_id WHERE u.id=?',req.userId);
+  const token=jwt.sign({id:user.id,version:user.token_version,purpose:'session'},getJWTSecret(),{expiresIn:'24h'});
+  req.io?.in('user:'+user.id).disconnectSockets(true);
+  res.json({message:'Password changed successfully.',token,user:publicUser(user)});
+};
+exports.avatar=async(req,res)=>{
+  const avatar=await getDB().get('SELECT avatar_data,avatar_mime FROM users WHERE id=?',req.userId);
+  if(!avatar?.avatar_data)fail(404,'Profile photo not found.');
+  res.set('Cache-Control','private, no-store');
+  res.type(avatar.avatar_mime).send(avatar.avatar_data);
+};
+exports.updateAvatar=async(req,res)=>{
+  const mime=String(req.headers['content-type']||'').split(';')[0].toLowerCase();
+  const data=req.body;
+  if(!Buffer.isBuffer(data)||!data.length)fail(400,'Choose a profile photo.');
+  if(data.length>5*1024*1024)fail(413,'Profile photo must be 5 MB or smaller.');
+  const png=mime==='image/png'&&data.length>=8&&data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
+  const jpeg=mime==='image/jpeg'&&data.length>=3&&data[0]===0xff&&data[1]===0xd8&&data[2]===0xff;
+  const webp=mime==='image/webp'&&data.length>=12&&data.subarray(0,4).toString()==='RIFF'&&data.subarray(8,12).toString()==='WEBP';
+  if(!png&&!jpeg&&!webp)fail(400,'Use a valid PNG, JPEG, or WebP image.');
+  await withWrite(tx=>tx.run('UPDATE users SET avatar_data=?,avatar_mime=? WHERE id=?',data,mime,req.userId));
+  const user=await getDB().get('SELECT u.*,i.name AS institute_name FROM users u LEFT JOIN institutes i ON i.id=u.institute_id WHERE u.id=?',req.userId);
+  res.json({message:'Profile photo updated.',user:publicUser(user)});
+};
+exports.deleteAvatar=async(req,res)=>{
+  await withWrite(tx=>tx.run('UPDATE users SET avatar_data=NULL,avatar_mime=NULL WHERE id=?',req.userId));
+  const user=await getDB().get('SELECT u.*,i.name AS institute_name FROM users u LEFT JOIN institutes i ON i.id=u.institute_id WHERE u.id=?',req.userId);
+  res.json({message:'Profile photo removed.',user:publicUser(user)});
+};
 async function list(req,res,role) {
   const institute=await scope(req);
   const rows=await getDB().all('SELECT u.*,i.name AS institute_name FROM users u LEFT JOIN institutes i ON i.id=u.institute_id WHERE u.role=?'+(institute?' AND u.institute_id=?':'')+' ORDER BY u.name',...[role,...(institute?[institute]:[])]);

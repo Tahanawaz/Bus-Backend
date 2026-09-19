@@ -33,8 +33,23 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   }
   return response;
  };
- const root=(await login('super@test.example')).token;
+ let root=(await login('super@test.example')).token;
  let a,b,adminA,adminB,studentA,studentB,driverA,driverB,studentToken,driverToken,busA,busB;
+ await t.test('every authenticated user can manage their own profile and password',async()=>{
+  const oldRoot=root;
+  const profile=await request('PUT','/auth/profile',root,{name:'Super Admin',email:'super@test.example',phone:'03001234567'});
+  assert.equal(profile.user.name,'Super Admin');assert.equal(profile.user.phone,'03001234567');assert.equal(profile.user.role,'superadmin');
+  await request('PUT','/auth/password',root,{currentPassword:'wrong-password',password:'new-profile-password',confirmPassword:'new-profile-password'},400);
+  const changed=await request('PUT','/auth/password',root,{currentPassword:'test-password',password:'new-profile-password',confirmPassword:'new-profile-password'});
+  assert.ok(changed.token);root=changed.token;
+  await request('GET','/auth/me',oldRoot,null,401);
+  assert.equal((await request('GET','/auth/me',root)).name,'Super Admin');
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+  const upload=await fetch(base+'/api/auth/avatar',{method:'PUT',headers:{Authorization:'Bearer '+root,'Content-Type':'image/png'},body:png});
+  assert.equal(upload.status,200);assert.equal((await upload.json()).user.has_avatar,true);
+  const image=await fetch(base+'/api/auth/avatar',{headers:{Authorization:'Bearer '+root}});assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');
+  await request('DELETE','/auth/avatar',root);assert.equal((await request('GET','/auth/me',root)).has_avatar,false);
+ });
  await t.test('only superadmin creates institutes and scoped administrators',async()=>{
   a=(await request('POST','/institutes',root,{name:'Alpha Institute',address:'Alpha Campus'},201)).id;
   b=(await request('POST','/institutes',root,{name:'Beta Institute',address:'Beta Campus'},201)).id;
@@ -103,7 +118,8 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   driverB=(await request('POST','/auth/register-driver',adminB,{name:'Beta Driver',email:'driver-b@test.example',password:'test-password'},201)).driverId;
   for(const token of [adminA,adminB])await request('POST','/routes',token,{name:'Campus Route',stops:['Gate','Library'],etas:['08:00','08:15']},201);
   const data={name:'Alpha Bus',number_plate:'ALPHA-1',route:'Campus Route',driver_id:driverA};
-  busA=(await request('POST','/buses',adminA,data,201)).busId;
+  await request('POST','/buses',adminA,{...data,number_plate:'BAD-TIME',departure_time:'8:30 AM'},400);
+  busA=(await request('POST','/buses',adminA,{...data,departure_time:'08:30'},201)).busId;
   busB=(await request('POST','/buses',adminB,{...data,name:'Beta Bus',number_plate:'BETA-1',driver_id:driverB},201)).busId;
   await request('POST','/buses',adminA,{...data,number_plate:'ALPHA-2',driver_id:driverB},400);
   await request('POST','/buses',adminA,{...data,number_plate:'ALPHA-2'},409);

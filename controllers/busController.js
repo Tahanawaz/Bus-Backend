@@ -15,7 +15,8 @@ async function save(req,res,editing) {
  if(!route)fail(400,'Choose a route in the same institute.');
  const driver=req.body.driver_id?Number(req.body.driver_id):null;
  if(driver && !await getDB().get("SELECT id FROM users WHERE id=? AND role='driver' AND institute_id=?",driver,institute))fail(400,'Choose a driver in the same institute.');
- const departure=String(req.body.departure_time||'').trim().slice(0,40);
+ const departure=String(req.body.departure_time||'').trim();
+ if(departure&&!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(departure))fail(400,'Choose a valid departure time.');
  const id=await withWrite(async tx=>{
    if(driver) {
      const assigned=await tx.get('SELECT name FROM buses WHERE driver_id=? AND id!=?',driver,old?.id||0);

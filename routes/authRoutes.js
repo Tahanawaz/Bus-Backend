@@ -5,6 +5,11 @@ const router=express.Router();
 router.post('/change-initial-password',c.changeInitialPassword);
 router.post('/signup',c.signup); router.post('/login',c.login);
 router.get('/me',verifyToken,c.me);
+router.put('/profile',verifyToken,c.updateProfile);
+router.put('/password',verifyToken,c.changePassword);
+router.get('/avatar',verifyToken,c.avatar);
+router.put('/avatar',verifyToken,express.raw({type:['image/png','image/jpeg','image/webp'],limit:'5mb'}),c.updateAvatar);
+router.delete('/avatar',verifyToken,c.deleteAvatar);
 router.post('/register-driver',verifyToken,isAdmin,c.registerDriver);
 router.post('/students',verifyToken,isAdmin,c.registerStudent);
 for(const [path,list,update,remove] of [

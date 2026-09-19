@@ -25,7 +25,7 @@ async function initDB(filename = process.env.DB_PATH || path.resolve(__dirname, 
     CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   const additions = {
-    users: { must_change_password: 'INTEGER NOT NULL DEFAULT 1', token_version: 'INTEGER NOT NULL DEFAULT 0', phone: 'TEXT', institute_id: 'INTEGER REFERENCES institutes(id)', status: "TEXT NOT NULL DEFAULT 'active'", suspension_reason: 'TEXT', access_start: 'TEXT', access_end: 'TEXT' },
+    users: { must_change_password: 'INTEGER NOT NULL DEFAULT 1', token_version: 'INTEGER NOT NULL DEFAULT 0', phone: 'TEXT', institute_id: 'INTEGER REFERENCES institutes(id)', status: "TEXT NOT NULL DEFAULT 'active'", suspension_reason: 'TEXT', access_start: 'TEXT', access_end: 'TEXT', avatar_data: 'BLOB', avatar_mime: 'TEXT' },
     buses: { institute_id: 'INTEGER REFERENCES institutes(id)', route_id: 'INTEGER REFERENCES routes(id)', current_stop: 'TEXT', departure_time: 'TEXT' },
     routes: { institute_id: 'INTEGER REFERENCES institutes(id)' }
   };
