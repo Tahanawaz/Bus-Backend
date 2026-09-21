@@ -1,67 +1,144 @@
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
-const path = require('path');
 const crypto = require('crypto');
+const { Pool, types } = require('pg');
+
+types.setTypeParser(20, value => Number(value));
+
+let pool;
 let db;
 let secret;
-let writes = Promise.resolve();
-async function withWrite(fn) {
-  const task = writes.then(async () => {
-    await db.exec('BEGIN IMMEDIATE');
-    try { const result = await fn(db); await db.exec('COMMIT'); return result; }
-    catch (err) { await db.exec('ROLLBACK'); throw err; }
-  });
-  writes = task.catch(() => {});
-  return task;
+
+function values(args) {
+  return args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
 }
-async function initDB(filename = process.env.DB_PATH || path.resolve(__dirname, '../database.sqlite')) {
-  db = await open({ filename, driver: sqlite3.Database });
-  await db.exec(`
-    PRAGMA busy_timeout = 5000;
-    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', phone TEXT);
-    CREATE TABLE IF NOT EXISTS buses (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, number_plate TEXT UNIQUE NOT NULL, driver_id INTEGER, route TEXT, lat REAL, lng REAL, status TEXT DEFAULT 'On time', current_stop TEXT, departure_time TEXT);
-    CREATE TABLE IF NOT EXISTS routes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, stops TEXT NOT NULL, etas TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS institutes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, address TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-  `);
-  const additions = {
-    users: { must_change_password: 'INTEGER NOT NULL DEFAULT 1', token_version: 'INTEGER NOT NULL DEFAULT 0', phone: 'TEXT', institute_id: 'INTEGER REFERENCES institutes(id)', status: "TEXT NOT NULL DEFAULT 'active'", suspension_reason: 'TEXT', access_start: 'TEXT', access_end: 'TEXT', avatar_data: 'BLOB', avatar_mime: 'TEXT' },
-    buses: { institute_id: 'INTEGER REFERENCES institutes(id)', route_id: 'INTEGER REFERENCES routes(id)', current_stop: 'TEXT', departure_time: 'TEXT' },
-    routes: { institute_id: 'INTEGER REFERENCES institutes(id)' }
+
+function postgresSql(sql) {
+  let index = 0;
+  return sql.replace(/\?/g, () => '$' + (++index));
+}
+
+function adapter(queryable, close) {
+  const query = (sql, params = []) => queryable.query(postgresSql(sql), params);
+  return {
+    query,
+    async get(sql, ...args) { return (await query(sql, values(args))).rows[0]; },
+    async all(sql, ...args) { return (await query(sql, values(args))).rows; },
+    async run(sql, ...args) {
+      let statement = sql;
+      if (/^\s*INSERT\s+INTO\s+(users|buses|routes|institutes|payments)\b/i.test(statement) && !/\bRETURNING\b/i.test(statement)) statement += ' RETURNING id';
+      const result = await query(statement, values(args));
+      return { lastID: result.rows[0]?.id, changes: result.rowCount, rowCount: result.rowCount };
+    },
+    async exec(sql) { await queryable.query(sql); },
+    close,
   };
-  await withWrite(async tx => {
-    for (const [table, columns] of Object.entries(additions)) {
-      const existing = (await tx.all('PRAGMA table_info(' + table + ')')).map(c => c.name);
-      for (const [name, definition] of Object.entries(columns)) {
-        if (!existing.includes(name)) await tx.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + definition);
-      }
-    }
-    if (!await tx.get("SELECT key FROM app_settings WHERE key = 'multi_institute_v1'")) {
-      await tx.run("INSERT OR IGNORE INTO institutes(name) VALUES ('Main Campus')");
-      const institute = await tx.get("SELECT id FROM institutes WHERE name = 'Main Campus'");
-      await tx.run("UPDATE users SET role = 'superadmin' WHERE role = 'admin' AND institute_id IS NULL");
-      await tx.run("UPDATE users SET institute_id = ? WHERE role != 'superadmin' AND institute_id IS NULL", institute.id);
-      await tx.run('UPDATE buses SET institute_id = ? WHERE institute_id IS NULL', institute.id);
-      await tx.run('UPDATE routes SET institute_id = ? WHERE institute_id IS NULL', institute.id);
-      await tx.run('UPDATE buses SET route_id = (SELECT id FROM routes WHERE routes.name = buses.route AND routes.institute_id = buses.institute_id LIMIT 1) WHERE route_id IS NULL');
-      await tx.run("INSERT INTO app_settings(key,value) VALUES ('multi_institute_v1','done')");
-    }
-    await tx.exec(`
-      CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, student_id INTEGER REFERENCES users(id), institute_id INTEGER NOT NULL REFERENCES institutes(id),
-        amount_cents INTEGER NOT NULL CHECK(amount_cents > 0), currency TEXT NOT NULL DEFAULT 'PKR',
-        access_start TEXT NOT NULL, access_end TEXT NOT NULL, reference TEXT NOT NULL DEFAULT '',
-        recorded_by INTEGER REFERENCES users(id), recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS one_admin_per_institute ON users(institute_id) WHERE role='admin';
-      CREATE INDEX IF NOT EXISTS users_institute_role ON users(institute_id, role);
-      CREATE INDEX IF NOT EXISTS buses_institute ON buses(institute_id);
-      CREATE INDEX IF NOT EXISTS routes_institute ON routes(institute_id);
-      CREATE INDEX IF NOT EXISTS payments_student ON payments(student_id);
-    `);
-    await tx.run("INSERT OR IGNORE INTO app_settings(key,value) VALUES ('jwt_secret',?)", crypto.randomBytes(48).toString('hex'));
+}
+
+async function withWrite(fn) {
+  const client = await pool.connect();
+  const tx = adapter(client);
+  try {
+    await client.query('BEGIN');
+    const result = await fn(tx);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function initDB(options = {}) {
+  if (typeof options === 'string') options = {};
+  const schema = options.schema || process.env.PGSCHEMA || 'public';
+  if (!/^[a-z_][a-z0-9_]*$/i.test(schema)) throw new Error('Invalid PostgreSQL schema name.');
+  if (pool) await pool.end().catch(() => {});
+  pool = new Pool({
+    host: process.env.PGHOST,
+    port: Number(process.env.PGPORT || 5432),
+    database: process.env.PGDATABASE,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    max: Number(process.env.DB_POOL_MAX || 10),
+    connectionTimeoutMillis: 5000,
+    options: '-c search_path=' + schema,
   });
-  secret = process.env.JWT_SECRET || (await db.get("SELECT value FROM app_settings WHERE key='jwt_secret'")).value;
+  pool.on('error', error => console.error('Unexpected PostgreSQL pool error:', error.message));
+  const root = adapter(pool, async () => { const active = pool; pool = null; db = null; await active.end(); });
+  await pool.query('CREATE SCHEMA IF NOT EXISTS "' + schema + '"');
+  await root.exec(`
+    CREATE TABLE IF NOT EXISTS institutes (
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      address TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'student',
+      phone TEXT,
+      must_change_password INTEGER NOT NULL DEFAULT 1,
+      token_version INTEGER NOT NULL DEFAULT 0,
+      institute_id INTEGER REFERENCES institutes(id),
+      status TEXT NOT NULL DEFAULT 'active',
+      suspension_reason TEXT,
+      access_start TEXT,
+      access_end TEXT,
+      avatar_data BYTEA,
+      avatar_mime TEXT
+    );
+    CREATE TABLE IF NOT EXISTS routes (
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      name TEXT NOT NULL,
+      stops TEXT NOT NULL,
+      etas TEXT NOT NULL,
+      stop_coordinates TEXT NOT NULL DEFAULT '[]',
+      institute_id INTEGER REFERENCES institutes(id)
+    );
+    ALTER TABLE routes ADD COLUMN IF NOT EXISTS stop_coordinates TEXT NOT NULL DEFAULT '[]';
+    CREATE TABLE IF NOT EXISTS buses (
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      name TEXT NOT NULL,
+      number_plate TEXT UNIQUE NOT NULL,
+      driver_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      route TEXT,
+      lat DOUBLE PRECISION,
+      lng DOUBLE PRECISION,
+      status TEXT DEFAULT 'On time',
+      current_stop TEXT,
+      departure_time TEXT,
+      institute_id INTEGER REFERENCES institutes(id),
+      route_id INTEGER REFERENCES routes(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      student_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      institute_id INTEGER NOT NULL REFERENCES institutes(id),
+      amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+      currency TEXT NOT NULL DEFAULT 'PKR',
+      access_start TEXT NOT NULL,
+      access_end TEXT NOT NULL,
+      reference TEXT NOT NULL DEFAULT '',
+      recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS one_admin_per_institute ON users(institute_id) WHERE role='admin';
+    CREATE UNIQUE INDEX IF NOT EXISTS routes_institute_name ON routes(institute_id,name);
+    CREATE INDEX IF NOT EXISTS users_institute_role ON users(institute_id,role);
+    CREATE INDEX IF NOT EXISTS buses_institute ON buses(institute_id);
+    CREATE INDEX IF NOT EXISTS routes_institute ON routes(institute_id);
+    CREATE INDEX IF NOT EXISTS payments_student ON payments(student_id);
+  `);
+  await root.run("INSERT INTO app_settings(key,value) VALUES ('jwt_secret',?) ON CONFLICT (key) DO NOTHING", crypto.randomBytes(48).toString('hex'));
+  secret = process.env.JWT_SECRET || (await root.get("SELECT value FROM app_settings WHERE key='jwt_secret'")).value;
+  db = root;
   return db;
 }
+
 module.exports = { initDB, getDB: () => db, getJWTSecret: () => secret, withWrite };

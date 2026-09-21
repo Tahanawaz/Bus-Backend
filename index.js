@@ -7,7 +7,7 @@ const {initDB,getDB}=require('./config/db');
 const {authenticate}=require('./middleware/authMiddleware');
 const {expireStudents,accessMessage}=require('./lib/access');
 async function createServer(options={}) {
- await initDB(options.dbPath);
+ await initDB(options.dbOptions);
  await expireStudents();
  const app=express();const server=http.createServer(app);
  const io=new Server(server,{cors:{origin:process.env.CLIENT_ORIGIN || '*'}});
@@ -21,7 +21,7 @@ async function createServer(options={}) {
  app.use('/api/reports',require('./routes/reportRoutes'));
  app.use((err,req,res,next)=>{
   if(res.headersSent)return next(err);
-  const constraint=String(err.code||'').startsWith('SQLITE_CONSTRAINT');
+  const constraint=['23502','23503','23505','23514'].includes(String(err.code||''));
   const status=err.status || (constraint?409:500);
   if(status===500)console.error(err);
   res.status(status).json({error:status===500?'Unable to complete request.':constraint?'This email, plate, or name is already in use.':err.message,code:err.code,message:err.detail||err.message});

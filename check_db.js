@@ -1,24 +1,13 @@
-const { open } = require('sqlite');
-const sqlite3 = require('sqlite3');
-const path = require('path');
+require('dotenv').config();
+const { initDB, getDB } = require('./config/db');
 
 async function check() {
-  const db = await open({
-    filename: path.resolve(__dirname, 'database.sqlite'),
-    driver: sqlite3.Database
-  });
-
-  console.log('--- ROUTES ---');
-  const routes = await db.all('SELECT * FROM routes');
-  console.log(JSON.stringify(routes, null, 2));
-
-  console.log('--- DRIVERS ---');
-  const drivers = await db.all('SELECT * FROM users WHERE role="driver"');
-  console.log(JSON.stringify(drivers, null, 2));
-
-  console.log('--- BUSES ---');
-  const buses = await db.all('SELECT * FROM buses');
-  console.log(JSON.stringify(buses, null, 2));
+  await initDB();
+  const db = getDB();
+  const server = await db.get("SELECT current_database() database,current_user username,current_setting('server_version') version");
+  const counts = await db.get("SELECT (SELECT count(*) FROM institutes) institutes,(SELECT count(*) FROM users) users,(SELECT count(*) FROM routes) routes,(SELECT count(*) FROM buses) buses,(SELECT count(*) FROM payments) payments");
+  console.log(JSON.stringify({ server, counts }, null, 2));
+  await db.close();
 }
 
-check().catch(console.error);
+check().catch(error => { console.error(error); process.exitCode = 1; });

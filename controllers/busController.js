@@ -53,10 +53,16 @@ exports.updateBusStatus=async(req,res)=>{
 };
 exports.updateBusStop=async(req,res)=>{
  const bus=await assigned(req);const stop=text(req.body.stopName,'Stop',160);
- const route=await getDB().get('SELECT stops FROM routes WHERE id=? AND institute_id=?',bus.route_id,bus.institute_id);
- if(!route||!JSON.parse(route.stops).includes(stop))fail(400,'Stop is not on this bus route.');
- await withWrite(tx=>tx.run('UPDATE buses SET current_stop=? WHERE id=?',stop,bus.id));
- emit(req,bus.institute_id,'stopUpdate',{id:bus.id,current_stop:stop});res.json({message:'Stop updated.'});
+ const route=await getDB().get('SELECT stops,stop_coordinates FROM routes WHERE id=? AND institute_id=?',bus.route_id,bus.institute_id);
+ const stops=route?JSON.parse(route.stops):[],index=stops.indexOf(stop);
+ if(index===-1)fail(400,'Stop is not on this bus route.');
+ const points=JSON.parse(route.stop_coordinates||'[]'),point=points[index];
+ const lat=Number(Array.isArray(point)?point[0]:point?.lat),lng=Number(Array.isArray(point)?point[1]:point?.lng);
+ if(!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180)fail(409,'This stop has no map location. Ask the admin to edit the route and place every stop on the map.');
+ await withWrite(tx=>tx.run('UPDATE buses SET current_stop=?,lat=?,lng=? WHERE id=?',stop,lat,lng,bus.id));
+ emit(req,bus.institute_id,'locationUpdate',{id:bus.id,lat,lng});
+ emit(req,bus.institute_id,'stopUpdate',{id:bus.id,current_stop:stop});
+ res.json({message:'Stop and location updated.',location:{lat,lng}});
 };
 exports.deleteBus=async(req,res)=>{
  const bus=await record(req,'buses');await withWrite(tx=>tx.run('DELETE FROM buses WHERE id=?',bus.id));

@@ -3,7 +3,6 @@ const {getDB,withWrite}=require('../config/db');
 const {verifyToken,isAdmin,isSuperAdmin}=require('../middleware/authMiddleware');
 const {scope,text,fail}=require('../lib/access');
 const router=express.Router();
-router.get('/public',async(req,res)=>res.json(await getDB().all('SELECT id,name FROM institutes ORDER BY name')));
 router.get('/',verifyToken,isAdmin,async(req,res)=>{
  const institute=req.userRole==='superadmin'?null:await scope(req);
  res.json(await getDB().all('SELECT * FROM institutes'+(institute?' WHERE id=?':'')+' ORDER BY name',...(institute?[institute]:[])));

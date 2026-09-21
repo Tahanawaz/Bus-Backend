@@ -8,13 +8,20 @@ const {getDB,withWrite}=require('../config/db');
 const {today,expireStudents}=require('../lib/access');
 const {io}=require('../../Bus-Frontend/node_modules/socket.io-client');
 const day=offset=>{const d=new Date();d.setUTCDate(d.getUTCDate()+offset);return d.toISOString().slice(0,10);};
+const schemaName=prefix=>prefix+'_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
+async function dropSchema(schema){
+ const {Client}=require('pg');
+ const client=new Client({host:process.env.PGHOST,port:Number(process.env.PGPORT||5432),database:process.env.PGDATABASE,user:process.env.PGUSER,password:process.env.PGPASSWORD,ssl:process.env.DB_SSL==='true'?{rejectUnauthorized:false}:false});
+ await client.connect();try{await client.query('DROP SCHEMA IF EXISTS "'+schema+'" CASCADE');}finally{await client.end();}
+}
 test('multi-institute access, payments, expiry, reports and live isolation',async t=>{
  const dir=fs.mkdtempSync(path.join(__dirname,'../tmp/integration-'));
- const service=await createServer({dbPath:path.join(dir,'test.sqlite')});
+ const schema=schemaName('integration');
+ const service=await createServer({dbOptions:{schema}});
  await new Promise(resolve=>service.server.listen(0,'127.0.0.1',resolve));
  const base='http://127.0.0.1:'+service.server.address().port;
  const sockets=[];
- t.after(async()=>{sockets.forEach(s=>s.disconnect());await service.close();});
+ t.after(async()=>{sockets.forEach(s=>s.disconnect());await service.close();await dropSchema(schema);});
  const hash=await bcrypt.hash('test-password',4);
  await withWrite(db=>db.run("INSERT INTO users(name,email,password,role,status,must_change_password) VALUES ('Super','super@test.example',?,'superadmin','active',0)",hash));
  const request=async(method,url,token,body,expected=200)=>{
@@ -94,8 +101,8 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   await request('DELETE','/institutes/'+empty,root,null,404);
   for(const [url,body] of [['/auth/students',{name:'Test',email:'test-s@test.example'}],['/auth/register-driver',{name:'Test',email:'test-d@test.example'}],['/routes',{name:'Route',stops:['Gate'],etas:['08:00']}],['/buses',{name:'Bus',number_plate:'TEST-9',route:'Route'}]])await request('POST',url,root,body,400);
  });
- await t.test('signup cannot choose privileged roles; new students require activation',async()=>{
-  studentA=(await request('POST','/auth/signup',null,{name:'Alpha Student',email:'student-a@test.example',password:'test-password',institute_id:a,role:'superadmin',status:'active'},201)).userId;
+ await t.test('admin-created students require activation',async()=>{
+  studentA=(await request('POST','/auth/students',adminA,{name:'Alpha Student',email:'student-a@test.example',role:'superadmin',status:'active'},201)).userId;
   studentB=(await request('POST','/auth/students',adminB,{name:'Beta Student',email:'student-b@test.example',password:'test-password'},201)).userId;
   const row=await getDB().get('SELECT * FROM users WHERE id=?',studentA);assert.equal(row.role,'student');assert.equal(row.status,'suspended');
   assert.match((await login('student-a@test.example',403)).error,/awaiting payment/);
@@ -116,7 +123,9 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
  await t.test('fleet assignments, driver ownership and routes are tenant scoped',async()=>{
   driverA=(await request('POST','/auth/register-driver',adminA,{name:'Alpha Driver',email:'driver-a@test.example',password:'test-password'},201)).driverId;
   driverB=(await request('POST','/auth/register-driver',adminB,{name:'Beta Driver',email:'driver-b@test.example',password:'test-password'},201)).driverId;
-  for(const token of [adminA,adminB])await request('POST','/routes',token,{name:'Campus Route',stops:['Gate','Library'],etas:['08:00','08:15']},201);
+  const stopCoordinates=[{lat:31.5204,lng:74.3587},{lat:31.5221,lng:74.3612}];
+  await request('POST','/routes',adminA,{name:'Invalid Route',stops:['Gate','Library'],etas:['08:00','08:15'],stop_coordinates:[{lat:91,lng:74.35},stopCoordinates[1]]},400);
+  for(const token of [adminA,adminB])await request('POST','/routes',token,{name:'Campus Route',stops:['Gate','Library'],etas:['08:00','08:15'],stop_coordinates:stopCoordinates},201);
   const data={name:'Alpha Bus',number_plate:'ALPHA-1',route:'Campus Route',driver_id:driverA};
   await request('POST','/buses',adminA,{...data,number_plate:'BAD-TIME',departure_time:'8:30 AM'},400);
   busA=(await request('POST','/buses',adminA,{...data,departure_time:'08:30'},201)).busId;
@@ -124,7 +133,7 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   await request('POST','/buses',adminA,{...data,number_plate:'ALPHA-2',driver_id:driverB},400);
   await request('POST','/buses',adminA,{...data,number_plate:'ALPHA-2'},409);
   assert.deepEqual((await request('GET','/buses',studentToken)).map(v=>v.id),[busA]);
-  assert.equal((await request('GET','/routes',studentToken)).length,1);
+  const studentRoutes=await request('GET','/routes',studentToken);assert.equal(studentRoutes.length,1);assert.deepEqual(JSON.parse(studentRoutes[0].stop_coordinates),stopCoordinates);
   await request('GET','/buses?institute_id='+b,studentToken,null,403);
   await request('DELETE','/buses/'+busB,adminA,null,404);
   driverToken=(await login('driver-a@test.example')).token;
@@ -132,6 +141,7 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   await request('PUT','/buses/'+busA+'/location',driverToken,{lat:91,lng:0},400);
   await request('PUT','/buses/'+busA+'/stop',driverToken,{stopName:'Wrong stop'},400);
   await request('PUT','/buses/'+busA+'/stop',driverToken,{stopName:'Gate'});
+  const arrivedBus=await request('GET','/buses/my-bus',driverToken);assert.equal(arrivedBus.lat,stopCoordinates[0].lat);assert.equal(arrivedBus.lng,stopCoordinates[0].lng);
   await request('PUT','/buses/'+busA+'/reset',driverToken,{});
   assert.equal((await request('GET','/buses/my-bus',driverToken)).current_stop,null);
  });
@@ -173,21 +183,12 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
  });
 });
 
-test('legacy migration preserves records and is safe to repeat',async()=>{
- const {open}=require('sqlite'),sqlite3=require('sqlite3');
+test('PostgreSQL schema initialization is safe to repeat',async()=>{
  const {initDB,getJWTSecret}=require('../config/db');
- const dir=fs.mkdtempSync(path.join(__dirname,'../tmp/migration-'));
- const filename=path.join(dir,'legacy.sqlite');
- const old=await open({filename,driver:sqlite3.Database});
- await old.exec("CREATE TABLE users(id INTEGER PRIMARY KEY,name TEXT,email TEXT,password TEXT,role TEXT); CREATE TABLE buses(id INTEGER PRIMARY KEY,name TEXT,number_plate TEXT,driver_id INTEGER,route TEXT,lat REAL,lng REAL,status TEXT); CREATE TABLE routes(id INTEGER PRIMARY KEY,name TEXT,stops TEXT,etas TEXT); INSERT INTO users VALUES(1,'Owner','owner@test.example','hash','admin'),(2,'Existing student','old@test.example','hash','student'); INSERT INTO routes VALUES(1,'Original route','[\"Gate\"]','[\"08:00\"]'); INSERT INTO buses VALUES(1,'Original bus','OLD-1',NULL,'Original route',NULL,NULL,'On time');");
- await old.close();
- let db=await initDB(filename);const secret=getJWTSecret();
- assert.equal((await db.get('SELECT role FROM users WHERE id=1')).role,'superadmin');
- assert.equal((await db.get('SELECT count(*) n FROM users')).n,2);
- assert.equal((await db.get('SELECT route_id FROM buses WHERE id=1')).route_id,1);
- const institute=(await db.get("SELECT id FROM institutes WHERE name='Main Campus'")).id;
- assert.equal((await db.get('SELECT institute_id FROM users WHERE id=2')).institute_id,institute);
- assert.equal((await db.get('SELECT status FROM users WHERE id=2')).status,'active');
- await db.close();db=await initDB(filename);
- assert.equal(getJWTSecret(),secret);assert.equal((await db.get('SELECT count(*) n FROM institutes')).n,1);await db.close();
+ const schema=schemaName('initialization');
+ let db=await initDB({schema});const secret=getJWTSecret();
+ assert.ok(secret);assert.equal((await db.get('SELECT count(*) n FROM users')).n,0);
+ await db.close();db=await initDB({schema});
+ assert.equal(getJWTSecret(),secret);assert.equal((await db.get('SELECT count(*) n FROM app_settings')).n,1);
+ await db.close();await dropSchema(schema);
 });

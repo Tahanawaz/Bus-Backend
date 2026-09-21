@@ -9,13 +9,9 @@ function identity(body, creating) {
   if ((creating || body.password) && (typeof body.password !== 'string' || body.password.length < 6 || Buffer.byteLength(body.password) > 72)) fail(400,'Password must be at least 6 characters and at most 72 bytes.');
   return {name,email};
 }
-async function create(req,res,role,publicSignup=false) {
+async function create(req,res,role) {
   const {name,email}=identity({...req.body,password:undefined},false);
-  let institute;
-  if(publicSignup) {
-    institute=Number(req.body.institute_id);
-    if(!await getDB().get('SELECT id FROM institutes WHERE id=?',institute)) fail(400,'Select an institute.');
-  } else institute=await scope(req,true);
+  const institute=await scope(req,true);
   const password=await bcrypt.hash('password123',10);
   const student=role==='student';
   const result=await withWrite(async tx=>{
@@ -25,7 +21,6 @@ async function create(req,res,role,publicSignup=false) {
   });
   res.status(201).json({message:student?'Student created. Record payment and access dates to activate.':'Account created.',userId:result.lastID,driverId:result.lastID});
 }
-exports.signup=(req,res)=>create(req,res,'student',true);
 exports.registerStudent=(req,res)=>create(req,res,'student');
 exports.registerDriver=(req,res)=>create(req,res,'driver');
 exports.registerAdmin=(req,res)=>create(req,res,'admin');
