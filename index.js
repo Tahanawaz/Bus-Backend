@@ -19,6 +19,7 @@ async function createServer(options={}) {
  app.use('/api/buses',require('./routes/busRoutes'));
  app.use('/api/routes',require('./routes/routeRoutes'));
  app.use('/api/reports',require('./routes/reportRoutes'));
+ app.use('/api/policies',require('./routes/policyRoutes'));
  app.use((err,req,res,next)=>{
   if(res.headersSent)return next(err);
   const constraint=['23502','23503','23505','23514'].includes(String(err.code||''));

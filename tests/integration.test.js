@@ -3,6 +3,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const bcrypt=require('bcrypt');
+const ExcelJS=require('exceljs');
 const {createServer}=require('../index');
 const {getDB,withWrite}=require('../config/db');
 const {today,expireStudents}=require('../lib/access');
@@ -109,6 +110,20 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   const rows=await request('GET','/auth/students',adminA);assert.deepEqual(rows.map(s=>s.id),[studentA]);assert.ok(!('password' in rows[0]));
   assert.equal((await request('GET','/auth/students',root)).length,2);
   for(const [method,suffix,body] of [['PUT','',{name:'Hacked',email:'x@test.example'}],['DELETE',''],['GET','/payments'],['POST','/payments',{amount:1}],['PUT','/access',{status:'suspended'}]])await request(method,'/auth/students/'+studentB+suffix,adminA,body,404);
+ });
+ await t.test('superadmin publishes policy PDFs and admins import students from Excel',async()=>{
+  const pdf=Buffer.from('%PDF-1.4\n%%EOF');
+  const forbidden=await fetch(base+'/api/policies/privacy',{method:'PUT',headers:{Authorization:'Bearer '+adminA,'Content-Type':'application/pdf'},body:pdf});assert.equal(forbidden.status,403);
+  const uploaded=await fetch(base+'/api/policies/privacy',{method:'PUT',headers:{Authorization:'Bearer '+root,'Content-Type':'application/pdf','X-File-Name':encodeURIComponent('Privacy Policy.pdf')},body:pdf});assert.equal(uploaded.status,200);
+  const policies=await (await fetch(base+'/api/policies')).json();assert.equal(policies.length,1);assert.equal(policies[0].type,'privacy');
+  const publicPdf=await fetch(base+'/api/policies/privacy/pdf');assert.equal(publicPdf.status,200);assert.equal(Buffer.from(await publicPdf.arrayBuffer()).subarray(0,5).toString(),'%PDF-');
+
+  const template=await fetch(base+'/api/auth/students/import-template',{headers:{Authorization:'Bearer '+adminA}});assert.equal(template.status,200);assert.match(template.headers.get('content-type'),/spreadsheetml/);
+  const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet('Students');sheet.addRow(['Name','Email','Phone']);sheet.addRow(['Bulk Student','bulk@test.example','03001112222']);sheet.addRow(['Existing Student','student-a@test.example','']);sheet.addRow(['Repeated Bulk','bulk@test.example','']);
+  const excel=Buffer.from(await workbook.xlsx.writeBuffer());
+  const imported=await fetch(base+'/api/auth/students/import',{method:'POST',headers:{Authorization:'Bearer '+adminA,'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:excel});assert.equal(imported.status,201);
+  const result=await imported.json();assert.equal(result.created,1);assert.equal(result.skipped,2);
+  const bulk=await getDB().get("SELECT * FROM users WHERE email='bulk@test.example'");assert.equal(bulk.role,'student');assert.equal(bulk.status,'suspended');assert.equal(bulk.institute_id,a);
  });
  await t.test('manual payments validate money/dates and activate an inclusive duration',async()=>{
   const payment={amount:'2500.50',currency:'PKR',access_start:today(),access_end:today(),reference:'ALPHA-001'};

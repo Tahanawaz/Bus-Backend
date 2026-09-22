@@ -24,7 +24,7 @@ function adapter(queryable, close) {
     async all(sql, ...args) { return (await query(sql, values(args))).rows; },
     async run(sql, ...args) {
       let statement = sql;
-      if (/^\s*INSERT\s+INTO\s+(users|buses|routes|institutes|payments)\b/i.test(statement) && !/\bRETURNING\b/i.test(statement)) statement += ' RETURNING id';
+      if (/^\s*INSERT\s+INTO\s+(users|buses|routes|institutes|payments)\b/i.test(statement) && !/\bRETURNING\b/i.test(statement) && !/\bON\s+CONFLICT\b/i.test(statement)) statement += ' RETURNING id';
       const result = await query(statement, values(args));
       return { lastID: result.rows[0]?.id, changes: result.rowCount, rowCount: result.rowCount };
     },
@@ -128,6 +128,14 @@ async function initDB(options = {}) {
       recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS policy_documents (
+      type TEXT PRIMARY KEY CHECK(type IN ('privacy','terms')),
+      original_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL DEFAULT 'application/pdf',
+      file_data BYTEA NOT NULL,
+      uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE UNIQUE INDEX IF NOT EXISTS one_admin_per_institute ON users(institute_id) WHERE role='admin';
     CREATE UNIQUE INDEX IF NOT EXISTS routes_institute_name ON routes(institute_id,name);
     CREATE INDEX IF NOT EXISTS users_institute_role ON users(institute_id,role);

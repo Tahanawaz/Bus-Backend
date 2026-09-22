@@ -1,5 +1,6 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const ExcelJS = require('exceljs');
 const { getDB, getJWTSecret, withWrite } = require('../config/db');
 const { scope, record, text, fail, publicUser, accessMessage, dates, today } = require('../lib/access');
 function identity(body, creating) {
@@ -24,6 +25,72 @@ async function create(req,res,role) {
 exports.registerStudent=(req,res)=>create(req,res,'student');
 exports.registerDriver=(req,res)=>create(req,res,'driver');
 exports.registerAdmin=(req,res)=>create(req,res,'admin');
+function excelText(cell) {
+  const value = cell?.value;
+  if (value && typeof value === 'object' && typeof value.text === 'string') return value.text.trim();
+  return String(cell?.text ?? value ?? '').trim();
+}
+exports.studentImportTemplate=async(req,res)=>{
+  const workbook=new ExcelJS.Workbook();
+  workbook.creator='SmartTrack';
+  const sheet=workbook.addWorksheet('Students');
+  sheet.columns=[
+    {header:'Name',key:'name',width:28},
+    {header:'Email',key:'email',width:34},
+    {header:'Phone',key:'phone',width:20}
+  ];
+  sheet.getRow(1).font={bold:true,color:{argb:'FFFFFFFF'}};
+  sheet.getRow(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF2563EB'}};
+  sheet.views=[{state:'frozen',ySplit:1}];
+  const instructions=workbook.addWorksheet('Instructions');
+  instructions.getColumn(1).width=95;
+  ['SmartTrack student import template','Enter one student per row in the Students sheet.','Name and Email are required. Phone is optional.','Imported students use temporary password password123 and remain suspended until payment/access is recorded.','Do not rename or remove the header row. Maximum 1,000 student rows per upload.'].forEach((line,index)=>instructions.getCell(index+1,1).value=line);
+  instructions.getCell('A1').font={bold:true,size:15};
+  const buffer=await workbook.xlsx.writeBuffer();
+  res.set('Content-Disposition','attachment; filename="smarttrack-student-import-template.xlsx"');
+  res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').send(Buffer.from(buffer));
+};
+exports.importStudents=async(req,res)=>{
+  const institute=await scope(req,true);
+  const data=req.body;
+  if(!Buffer.isBuffer(data)||!data.length)fail(400,'Choose an Excel .xlsx file.');
+  if(data.length>5*1024*1024)fail(413,'Excel file must be 5 MB or smaller.');
+  if(data.length<4||data[0]!==0x50||data[1]!==0x4b)fail(400,'Use a valid Excel .xlsx file.');
+  const workbook=new ExcelJS.Workbook();
+  try{await workbook.xlsx.load(data);}catch{fail(400,'This Excel file could not be read. Download and use the SmartTrack template.');}
+  const sheet=workbook.getWorksheet('Students')||workbook.worksheets[0];
+  if(!sheet)fail(400,'The Excel file has no worksheet.');
+  const header={};
+  sheet.getRow(1).eachCell((cell,column)=>{header[excelText(cell).toLowerCase().replace(/[^a-z]/g,'')]=column;});
+  if(!header.name||!header.email)fail(400,'Header row must contain Name and Email columns.');
+  if(sheet.actualRowCount-1>1000)fail(400,'Import a maximum of 1,000 student rows at a time.');
+  const rows=[];const errors=[];const seen=new Set();
+  for(let number=2;number<=sheet.actualRowCount;number++){
+    const row=sheet.getRow(number);
+    const name=excelText(row.getCell(header.name));
+    const email=excelText(row.getCell(header.email)).toLowerCase();
+    const phone=header.phone?excelText(row.getCell(header.phone)):'';
+    if(!name&&!email&&!phone)continue;
+    let message='';
+    if(!name||name.length>160)message='Name is required and must be 160 characters or fewer.';
+    else if(email.length>254||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))message='Enter a valid email address.';
+    else if(phone.length>30)message='Phone must be 30 characters or fewer.';
+    else if(seen.has(email))message='Duplicate email in this Excel file.';
+    if(message){errors.push({row:number,email,message});continue;}
+    seen.add(email);rows.push({row:number,name,email,phone});
+  }
+  if(!rows.length&&errors.length===0)fail(400,'No student rows were found in the Excel file.');
+  const password=await bcrypt.hash('password123',10);
+  let created=0;
+  await withWrite(async tx=>{
+    for(const student of rows){
+      const result=await tx.run(`INSERT INTO users(name,email,password,role,phone,institute_id,status,suspension_reason)
+        VALUES (?,?,?,'student',?,?, 'suspended','pending') ON CONFLICT(email) DO NOTHING`,student.name,student.email,password,student.phone||null,institute);
+      if(result.changes)created++;else errors.push({row:student.row,email:student.email,message:'Email already exists.'});
+    }
+  });
+  res.status(created?201:200).json({message:created+' student'+(created===1?'':'s')+' imported.',created,skipped:errors.length,errors:errors.slice(0,100)});
+};
 exports.login=async(req,res)=>{
   const email=String(req.body.email || '').trim().toLowerCase();
   const user=await getDB().get('SELECT u.*,i.name AS institute_name FROM users u LEFT JOIN institutes i ON i.id=u.institute_id WHERE lower(u.email)=?',email);

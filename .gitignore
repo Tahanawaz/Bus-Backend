@@ -4,3 +4,8 @@ backups/
 .env
 *.sqlite
 *.sqlite-*
+
+
+.env
+*.log
+node_modules/

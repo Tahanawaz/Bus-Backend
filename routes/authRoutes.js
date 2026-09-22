@@ -12,6 +12,8 @@ router.put('/avatar',verifyToken,express.raw({type:['image/png','image/jpeg','im
 router.delete('/avatar',verifyToken,c.deleteAvatar);
 router.post('/register-driver',verifyToken,isAdmin,c.registerDriver);
 router.post('/students',verifyToken,isAdmin,c.registerStudent);
+router.get('/students/import-template',verifyToken,isAdmin,c.studentImportTemplate);
+router.post('/students/import',verifyToken,isAdmin,express.raw({type:['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','application/octet-stream'],limit:'5mb'}),c.importStudents);
 for(const [path,list,update,remove] of [
  ['students',c.getAllStudents,c.updateStudent,c.deleteStudent],['drivers',c.getAllDrivers,c.updateDriver,c.deleteDriver]
 ]) { router.get('/'+path,verifyToken,isAdmin,list); router.put('/'+path+'/:id',verifyToken,isAdmin,update); router.delete('/'+path+'/:id',verifyToken,isAdmin,remove); }
