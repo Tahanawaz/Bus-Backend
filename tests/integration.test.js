@@ -117,6 +117,10 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   const uploaded=await fetch(base+'/api/policies/privacy',{method:'PUT',headers:{Authorization:'Bearer '+root,'Content-Type':'application/pdf','X-File-Name':encodeURIComponent('Privacy Policy.pdf')},body:pdf});assert.equal(uploaded.status,200);
   const policies=await (await fetch(base+'/api/policies')).json();assert.equal(policies.length,1);assert.equal(policies[0].type,'privacy');
   const publicPdf=await fetch(base+'/api/policies/privacy/pdf');assert.equal(publicPdf.status,200);assert.equal(Buffer.from(await publicPdf.arrayBuffer()).subarray(0,5).toString(),'%PDF-');
+  await request('PUT','/policies/social',adminA,{facebook:'https://facebook.com/example'},403);
+  await request('PUT','/policies/social',root,{facebook:'http://invalid.example.com',instagram:''},400);
+  await request('PUT','/policies/social',root,{facebook:'https://www.facebook.com/smarttrack',instagram:'https://instagram.com/smarttrack'});
+  const social=await request('GET','/policies/social');assert.match(social.facebook,/facebook\.com/);assert.match(social.instagram,/instagram\.com/);
 
   const template=await fetch(base+'/api/auth/students/import-template',{headers:{Authorization:'Bearer '+adminA}});assert.equal(template.status,200);assert.match(template.headers.get('content-type'),/spreadsheetml/);
   const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet('Students');sheet.addRow(['Name','Email','Phone']);sheet.addRow(['Bulk Student','bulk@test.example','03001112222']);sheet.addRow(['Existing Student','student-a@test.example','']);sheet.addRow(['Repeated Bulk','bulk@test.example','']);
@@ -124,6 +128,19 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   const imported=await fetch(base+'/api/auth/students/import',{method:'POST',headers:{Authorization:'Bearer '+adminA,'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:excel});assert.equal(imported.status,201);
   const result=await imported.json();assert.equal(result.created,1);assert.equal(result.skipped,2);
   const bulk=await getDB().get("SELECT * FROM users WHERE email='bulk@test.example'");assert.equal(bulk.role,'student');assert.equal(bulk.status,'suspended');assert.equal(bulk.institute_id,a);
+ });
+ await t.test('public contact requests are visible only to the superadmin',async()=>{
+  await request('POST','/contacts',null,{name:'Campus Manager',email:'manager@example.com',phone:'+92 300 1234567',message:'Help'},201);
+  await request('POST','/contacts',null,{name:'Invalid',email:'bad',phone:'1',message:'Help'},400);
+  await request('GET','/contacts',adminA,null,403);
+  const contacts=await request('GET','/contacts',root);assert.equal(contacts.length,1);assert.equal(contacts[0].email,'manager@example.com');assert.equal(contacts[0].status,'unread');
+  await request('PUT','/contacts/'+contacts[0].id+'/status',root,{status:'read'});
+  assert.equal((await request('GET','/contacts?status=read',root)).length,1);
+  await request('PUT','/contacts/'+contacts[0].id+'/status',root,{status:'unread'});
+  const marked=await request('PUT','/contacts/read-all',root,{});assert.equal(marked.updated,1);
+  await request('PUT','/contacts/'+contacts[0].id+'/status',root,{status:'resolved'});
+  const resolved=await request('GET','/contacts?status=resolved',root);assert.equal(resolved.length,1);assert.equal(resolved[0].status,'resolved');
+  await request('DELETE','/contacts/'+contacts[0].id,root);assert.equal((await request('GET','/contacts',root)).length,0);
  });
  await t.test('manual payments validate money/dates and activate an inclusive duration',async()=>{
   const payment={amount:'2500.50',currency:'PKR',access_start:today(),access_end:today(),reference:'ALPHA-001'};

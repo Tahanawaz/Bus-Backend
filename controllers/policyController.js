@@ -15,6 +15,34 @@ exports.list = async (req, res) => {
   res.json(rows.map(row => ({ ...row, title: label(row.type) })));
 };
 
+function socialUrl(value, platform) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length > 500) fail(400, platform + ' URL must be 500 characters or fewer.');
+  let url;
+  try { url = new URL(raw); } catch { fail(400, 'Enter a valid ' + platform + ' URL.'); }
+  const host = url.hostname.toLowerCase().replace(/^www\./,'');
+  const validHost = platform === 'Facebook' ? host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' : host === 'instagram.com' || host.endsWith('.instagram.com');
+  if (url.protocol !== 'https:' || !validHost) fail(400, 'Enter a valid https ' + platform + ' profile URL.');
+  return url.toString();
+}
+
+exports.social = async (req,res) => {
+  const rows = await getDB().all("SELECT key,value FROM app_settings WHERE key IN ('social_facebook','social_instagram')");
+  const settings = Object.fromEntries(rows.map(row=>[row.key,row.value]));
+  res.json({facebook:settings.social_facebook||'',instagram:settings.social_instagram||''});
+};
+
+exports.updateSocial = async (req,res) => {
+  const facebook = socialUrl(req.body.facebook,'Facebook');
+  const instagram = socialUrl(req.body.instagram,'Instagram');
+  await withWrite(async tx=>{
+    await tx.run("INSERT INTO app_settings(key,value) VALUES ('social_facebook',?) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",facebook);
+    await tx.run("INSERT INTO app_settings(key,value) VALUES ('social_instagram',?) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",instagram);
+  });
+  res.json({message:'Social links updated.',facebook,instagram});
+};
+
 exports.pdf = async (req, res) => {
   const type = typeFrom(req);
   const document = await getDB().get('SELECT original_name,mime_type,file_data FROM policy_documents WHERE type=?', type);
