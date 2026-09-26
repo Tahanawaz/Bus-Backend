@@ -130,10 +130,10 @@ test('multi-institute access, payments, expiry, reports and live isolation',asyn
   const bulk=await getDB().get("SELECT * FROM users WHERE email='bulk@test.example'");assert.equal(bulk.role,'student');assert.equal(bulk.status,'suspended');assert.equal(bulk.institute_id,a);
  });
  await t.test('public contact requests are visible only to the superadmin',async()=>{
-  await request('POST','/contacts',null,{name:'Campus Manager',email:'manager@example.com',phone:'+92 300 1234567',message:'Help'},201);
+  await request('POST','/contacts',null,{name:'Campus Manager',email:'manager@example.com',phone:'+92 300 1234567',organization:'Lahore Campus',designation:'Transport Manager',message:'Help'},201);
   await request('POST','/contacts',null,{name:'Invalid',email:'bad',phone:'1',message:'Help'},400);
   await request('GET','/contacts',adminA,null,403);
-  const contacts=await request('GET','/contacts',root);assert.equal(contacts.length,1);assert.equal(contacts[0].email,'manager@example.com');assert.equal(contacts[0].status,'unread');
+  const contacts=await request('GET','/contacts',root);assert.equal(contacts.length,1);assert.equal(contacts[0].email,'manager@example.com');assert.equal(contacts[0].status,'unread');assert.equal(contacts[0].service,'Free demo');assert.equal(contacts[0].organization,'Lahore Campus');assert.equal(contacts[0].designation,'Transport Manager');
   await request('PUT','/contacts/'+contacts[0].id+'/status',root,{status:'read'});
   assert.equal((await request('GET','/contacts?status=read',root)).length,1);
   await request('PUT','/contacts/'+contacts[0].id+'/status',root,{status:'unread'});

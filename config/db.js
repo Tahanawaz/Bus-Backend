@@ -142,6 +142,7 @@ async function initDB(options = {}) {
       email TEXT NOT NULL,
       phone TEXT NOT NULL,
       organization TEXT NOT NULL DEFAULT '',
+      designation TEXT NOT NULL DEFAULT '',
       service TEXT NOT NULL DEFAULT 'General enquiry',
       message TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'unread' CHECK(status IN ('unread','resolved')),
@@ -149,6 +150,7 @@ async function initDB(options = {}) {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     ALTER TABLE contact_inquiries DROP CONSTRAINT IF EXISTS contact_inquiries_status_check;
+    ALTER TABLE contact_inquiries ADD COLUMN IF NOT EXISTS designation TEXT NOT NULL DEFAULT '';
     ALTER TABLE contact_inquiries ADD CONSTRAINT contact_inquiries_status_check CHECK(status IN ('unread','read','resolved'));
     CREATE UNIQUE INDEX IF NOT EXISTS one_admin_per_institute ON users(institute_id) WHERE role='admin';
     CREATE UNIQUE INDEX IF NOT EXISTS routes_institute_name ON routes(institute_id,name);
